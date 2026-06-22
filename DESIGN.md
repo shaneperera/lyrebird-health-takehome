@@ -2,61 +2,41 @@
 
 ## Problem
 
-Clinics need a reliable system to manage appointments that prevents scheduling conflicts. The core challenge is **preventing overlapping appointments** for the same clinician while maintaining data integrity under concurrent requests.
-
-## Background
-
-### Requirements
-
-Build a RESTful API for clinic appointment management with the following capabilities:
+Prevent overlapping appointments for the same clinician while maintaining data integrity under concurrent requests.
 
 **Core Endpoints:**
-1. `POST /api/appointments` - Create appointments with overlap validation
-2. `GET /api/clinicians/{id}/appointments` - View clinician's schedule (with optional date filters)
-3. `GET /api/appointments` - Admin view of all appointments (with optional date filters)
+- `POST /api/appointments` - Create with overlap validation
+- `GET /api/clinicians/{id}/appointments` - View schedule (optional date filters)
+- `GET /api/appointments` - Admin view (optional date filters)
 
-**Supporting Endpoints:**
-4. `POST /api/clinicians` - Create clinician records
-5. `POST /api/patients` - Create patient records
-6. `GET /api/clinicians` - List all clinicians
-7. `GET /api/patients` - List all patients
+**Constraints:**
+- No overlapping appointments (touching endpoints allowed)
+- Validate: `start < end`, ISO datetimes, entities exist, no past appointments
+- Role-based access (patient/clinician/admin)
+- 80%+ test coverage
 
-**Key Constraints:**
-- No overlapping appointments for the same clinician (touching endpoints are allowed)
-- Validate: `start < end`, valid ISO datetimes, entities exist, no past appointments
-- Role-based access control (patient/clinician/admin)
-- Comprehensive test coverage (80%+)
+## Solution
 
-## Proposed Solution
-
-### Architecture Overview
+### Architecture
 
 ```mermaid
-graph TD
-    A[HTTP Request] --> B[Express Middleware]
-    B --> C{Validation}
-    C -->|Invalid| D[Error Response]
-    C -->|Valid| E[Controller]
-    E --> F[Service Layer]
-    F --> G{Business Logic}
-    G -->|Validation Failed| D
-    G -->|Success| H[Repository]
-    H --> I[(SQLite + Prisma)]
-    I --> H
-    H --> F
-    F --> E
-    E --> J[JSON Response]
+graph LR
+    A[Client Request] --> B[Middleware<br/>Auth + Validation]
+    B --> C[Service<br/>Business Logic]
+    C --> D[Repository<br/>SERIALIZABLE Transaction]
+    D --> E[(SQLite)]
+    E --> D
+    D --> C
+    C --> A
+    
+    style D fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
-**Layered Architecture:**
-- **Controllers**: Handle HTTP, delegate to services
-- **Services**: Business logic, validation orchestration
-- **Repositories**: Data access, transaction management
-- **Middleware**: Auth, validation, error handling
+**Flow:** Request → Auth/Validation → Business Logic → **SERIALIZABLE Transaction** → Database
 
-### Critical Flow: Overlap Detection with SERIALIZABLE Transaction
+**Key:** Repository layer uses SERIALIZABLE transactions to prevent race conditions during overlap checks.
 
-**The key innovation** - preventing race conditions during appointment creation:
+### Critical: Overlap Detection with SERIALIZABLE Transactions
 
 ```mermaid
 sequenceDiagram
@@ -127,120 +107,22 @@ erDiagram
 - Transaction support with configurable isolation levels
 
 **Key Schema Decisions:**
-- **UUIDs** for primary keys (better for distributed systems, no sequential guessing)
-- **Composite index** on `(clinicianId, startTime, endTime)` for fast overlap queries
-- **Cascade deletes** to maintain referential integrity
-- **Timestamps** for auditing (createdAt, updatedAt auto-managed by Prisma)
+- **UUIDs** for primary keys (distributed-friendly)
+- **Composite index** `(clinicianId, startTime, endTime)` for fast overlap queries
+- **Cascade deletes** for referential integrity
+- **Timestamps** auto-managed by Prisma
 
-### Request/Response Details
+## Key Design Decisions
 
-#### POST /api/appointments
+### 1. SERIALIZABLE Transactions
 
-**Request:**
-```json
-{
-  "clinicianId": "uuid",
-  "patientId": "uuid",
-  "startTime": "2024-12-25T10:00:00Z",
-  "endTime": "2024-12-25T11:00:00Z"
-}
-```
-
-**Success Response (201):**
-```json
-{
-  "id": "uuid",
-  "clinicianId": "uuid",
-  "patientId": "uuid",
-  "startTime": "2024-12-25T10:00:00Z",
-  "endTime": "2024-12-25T11:00:00Z",
-  "createdAt": "2024-12-20T08:00:00Z",
-  "updatedAt": "2024-12-20T08:00:00Z",
-  "clinician": {
-    "id": "uuid",
-    "name": "Dr. Smith"
-  },
-  "patient": {
-    "id": "uuid",
-    "name": "John Doe"
-  }
-}
-```
-
-**Error Responses:**
-- `400 Bad Request` - Invalid input (bad dates, start >= end, invalid UUIDs)
-- `404 Not Found` - Clinician or patient doesn't exist
-- `409 Conflict` - Appointment overlaps with existing appointment
-- `403 Forbidden` - Missing or invalid X-Role header
-
-#### GET /api/clinicians/{id}/appointments
-
-**Query Parameters:**
-- `from` (optional): ISO datetime - filter appointments starting after this time
-- `to` (optional): ISO datetime - filter appointments ending before this time
-
-**Success Response (200):**
-```json
-[
-  {
-    "id": "uuid",
-    "clinicianId": "uuid",
-    "patientId": "uuid",
-    "startTime": "2024-12-25T10:00:00Z",
-    "endTime": "2024-12-25T11:00:00Z",
-    "createdAt": "2024-12-20T08:00:00Z",
-    "updatedAt": "2024-12-20T08:00:00Z",
-    "clinician": { "id": "uuid", "name": "Dr. Smith" },
-    "patient": { "id": "uuid", "name": "John Doe" }
-  }
-]
-```
-
-**Error Responses:**
-- `404 Not Found` - Clinician doesn't exist
-- `403 Forbidden` - Wrong role (requires clinician or admin)
-
-#### GET /api/appointments
-
-**Query Parameters:** Same as clinician appointments
-
-**Success Response (200):** Array of all upcoming appointments (same format)
-
-**Error Responses:**
-- `403 Forbidden` - Not admin role
-
-### Trade-offs & Design Decisions
-
-#### 1. SERIALIZABLE Transaction Isolation
-
-**Decision:** Use SQLite's SERIALIZABLE isolation level for appointment creation.
-
-**Rationale:**
-- Prevents race conditions (phantom reads where two concurrent requests both see no overlap)
-- Atomic check-and-insert operation
-- Leverages database guarantees instead of application-level locking
+**Why:** Prevents race conditions where concurrent requests both see no overlap and create conflicting appointments.
 
 **Trade-offs:**
-- ✅ **Pro:** Simple, correct, no application-level locks to manage
-- ✅ **Pro:** Works correctly even under high concurrency
-- ❌ **Con:** Global write lock in SQLite = one write at a time across entire DB
-- ❌ **Con:** Can cause contention under very high load
+- ✅ Simple, correct, database handles concurrency
+- ❌ SQLite global write lock = limited throughput (~1000 writes/sec)
 
-**Cost/Performance:**
-- **Latency:** ~5-10ms per appointment creation (local SQLite)
-- **Throughput:** Limited by SQLite's single-writer model (~1000 writes/sec theoretical max)
-- **Scaling:** Doesn't scale horizontally
-
-**Production Alternative:**
-```sql
--- PostgreSQL with row-level locking
-BEGIN;
-SELECT * FROM appointments
-WHERE clinician_id = ? AND start_time < ? AND end_time > ?
-FOR UPDATE;  -- Row-level lock, not global
-INSERT INTO appointments ...;
-COMMIT;
-```
+**Production:** Use PostgreSQL with `SELECT ... FOR UPDATE` (row-level locks, not global)
 
 #### 2. Overlap Detection Algorithm
 
@@ -301,77 +183,16 @@ where: {
 | GET /clinicians | ✅ | ✅ | ✅ |
 | GET /patients | ✅ | ✅ | ✅ |
 
-#### 4. Explicit Entity Creation
+#### 4. Validation & Error Handling
 
-**Decision:** Require explicit POST endpoints for clinicians/patients (not auto-create on first use).
+**Three-layer validation:**
+1. **Schema (Zod)**: Type/format validation in middleware
+2. **Business (Services)**: `start < end`, no past appointments, entities exist
+3. **Database (Repository)**: Overlap detection in SERIALIZABLE transaction
 
-**Rationale:**
-- More realistic API design
-- Clear entity lifecycle
-- Better validation and error messages
-- Prevents accidental typos creating ghost records
+**Error responses:** Consistent format with HTTP status codes (400/404/409/403)
 
-**Trade-offs:**
-- ✅ **Pro:** Explicit, predictable
-- ✅ **Pro:** Admin control over entities
-- ❌ **Con:** Requires additional setup steps
-
-### Implementation Notes
-
-#### Validation Strategy
-
-**Three layers of validation:**
-
-1. **Schema validation (Zod)** - Applied in middleware
-   - Type checking
-   - Format validation (ISO datetimes, UUIDs)
-   - Required fields
-
-2. **Business validation (Service layer)** - Applied in services
-   - `start < end`
-   - No appointments in the past
-   - Entities exist
-
-3. **Database validation (Repository layer)** - Applied in transactions
-   - No overlapping appointments
-   - Referential integrity (handled by Prisma)
-
-#### Error Handling
-
-**Consistent error response format:**
-```json
-{
-  "error": "Human-readable error message",
-  "details": [  // Optional, for validation errors
-    {
-      "path": "startTime",
-      "message": "startTime must be before endTime"
-    }
-  ]
-}
-```
-
-**Error hierarchy:**
-```typescript
-AppError (base)
-├── ValidationError (400)
-├── NotFoundError (404)
-├── ConflictError (409)
-└── UnauthorizedError (403)
-```
-
-#### Date Handling
-
-**Format:** ISO 8601 strings in UTC
-- Input: `"2024-12-25T10:00:00Z"`
-- Storage: SQLite DateTime (stored as ISO string)
-- Output: ISO 8601 string
-
-**Library:** date-fns for parsing and comparison
-- `parseISO()` - Parse ISO strings
-- `isBefore()` - Compare dates
-- `isFuture()` - Validate not in past
-- `formatISO()` - Format for response
+**Dates:** ISO 8601 UTC strings, validated with date-fns
 
 #### Database Indexing
 
