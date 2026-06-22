@@ -1,5 +1,5 @@
 // Prisma Schema for Clinic Appointment System
-// This is the initial setup - models will be added in the next commit
+// Complete data model with proper indexes and relations
 
 generator client {
   provider = "prisma-client-js"
@@ -8,4 +8,42 @@ generator client {
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
+}
+
+model Clinician {
+  id           String        @id @default(uuid())
+  name         String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  appointments Appointment[]
+
+  @@map("clinicians")
+}
+
+model Patient {
+  id           String        @id @default(uuid())
+  name         String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  appointments Appointment[]
+
+  @@map("patients")
+}
+
+model Appointment {
+  id          String    @id @default(uuid())
+  clinicianId String
+  patientId   String
+  startTime   DateTime
+  endTime     DateTime
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  clinician Clinician @relation(fields: [clinicianId], references: [id], onDelete: Cascade)
+  patient   Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  // CRITICAL: Composite index for efficient overlap queries
+  // Optimizes: WHERE clinicianId = ? AND startTime < ? AND endTime > ?
+  @@index([clinicianId, startTime, endTime])
+  @@map("appointments")
 }
