@@ -54,117 +54,39 @@ graph TD
 - **Repositories**: Data access, transaction management
 - **Middleware**: Auth, validation, error handling
 
-### API Flow Diagrams
+### Critical Flow: Overlap Detection with SERIALIZABLE Transaction
 
-#### 1. Create Appointment Flow
+**The key innovation** - preventing race conditions during appointment creation:
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Middleware
-    participant Controller
     participant Service
     participant Repository
     participant Database
 
-    Client->>Middleware: POST /api/appointments + X-Role header
-    Middleware->>Middleware: Validate X-Role (patient/admin)
-    Middleware->>Middleware: Validate request body (Zod)
-    Middleware->>Controller: Forward validated request
-    Controller->>Service: createAppointment(dto)
-    Service->>Service: Validate start < end
-    Service->>Service: Check if appointment in past
-    Service->>Repository: Check clinician exists
-    Repository->>Database: SELECT clinician WHERE id=?
-    Database-->>Repository: Result
-    Repository-->>Service: exists: true/false
-    Service->>Repository: Check patient exists
-    Repository->>Database: SELECT patient WHERE id=?
-    Database-->>Repository: Result
-    Repository-->>Service: exists: true/false
+    Client->>Service: createAppointment(dto)
+    Service->>Service: Validate business rules
     Service->>Repository: createWithOverlapCheck(...)
 
-    Note over Repository,Database: SERIALIZABLE Transaction Begins
+    Note over Repository,Database: SERIALIZABLE Transaction
     Repository->>Database: BEGIN TRANSACTION (SERIALIZABLE)
-    Repository->>Database: SELECT * FROM appointments<br/>WHERE clinicianId=? AND<br/>startTime < ? AND endTime > ?
-    Database-->>Repository: Overlapping appointments
-
-    alt Overlap Detected
+    Repository->>Database: Check overlap:<br/>WHERE clinicianId=? AND<br/>startTime < ? AND endTime > ?
+    
+    alt Overlap Found
+        Database-->>Repository: Existing appointment
         Repository-->>Service: throw OVERLAP_DETECTED
-        Service-->>Controller: throw ConflictError
-        Controller-->>Client: 409 Conflict
+        Service-->>Client: 409 Conflict
     else No Overlap
         Repository->>Database: INSERT appointment
+        Repository->>Database: COMMIT
         Database-->>Repository: Created appointment
-        Repository->>Database: COMMIT TRANSACTION
-        Repository-->>Service: Appointment with relations
-        Service-->>Controller: Appointment
-        Controller-->>Client: 201 Created + JSON
+        Repository-->>Service: Success
+        Service-->>Client: 201 Created
     end
 ```
 
-#### 2. List Clinician Appointments Flow
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Middleware
-    participant Controller
-    participant Service
-    participant Repository
-    participant Database
-
-    Client->>Middleware: GET /api/clinicians/{id}/appointments?from=...&to=...
-    Middleware->>Middleware: Validate X-Role (clinician/admin)
-    Middleware->>Middleware: Validate query params (Zod)
-    Middleware->>Controller: Forward request
-    Controller->>Service: getClinicianAppointments(id, filters)
-    Service->>Repository: exists(clinicianId)
-    Repository->>Database: SELECT COUNT(*) FROM clinicians WHERE id=?
-    Database-->>Repository: count
-
-    alt Clinician Not Found
-        Repository-->>Service: exists: false
-        Service-->>Controller: throw NotFoundError
-        Controller-->>Client: 404 Not Found
-    else Clinician Exists
-        Service->>Repository: findUpcomingByClinicianId(id, filters)
-        Repository->>Database: SELECT * FROM appointments<br/>WHERE clinicianId=? AND<br/>endTime >= ? AND startTime <= ?<br/>ORDER BY startTime ASC
-        Database-->>Repository: Appointments with relations
-        Repository-->>Service: Appointments[]
-        Service-->>Controller: Appointments[]
-        Controller-->>Client: 200 OK + JSON array
-    end
-```
-
-#### 3. List All Appointments (Admin) Flow
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Middleware
-    participant Controller
-    participant Service
-    participant Repository
-    participant Database
-
-    Client->>Middleware: GET /api/appointments?from=...&to=...
-    Middleware->>Middleware: Validate X-Role (admin only)
-
-    alt Role != admin
-        Middleware-->>Client: 403 Forbidden
-    else Role == admin
-        Middleware->>Middleware: Validate query params
-        Middleware->>Controller: Forward request
-        Controller->>Service: getAllUpcomingAppointments(filters)
-        Service->>Repository: findAllUpcoming(filters)
-        Repository->>Database: SELECT * FROM appointments<br/>WHERE endTime >= ? AND startTime <= ?<br/>ORDER BY startTime, clinicianId
-        Database-->>Repository: All appointments with relations
-        Repository-->>Service: Appointments[]
-        Service-->>Controller: Appointments[]
-        Controller-->>Client: 200 OK + JSON array
-    end
-```
+**Why SERIALIZABLE matters**: Two concurrent requests both check for overlaps → SERIALIZABLE forces them to run sequentially → second request sees first appointment → conflict detected → no double-booking!
 
 ### Data Model
 
