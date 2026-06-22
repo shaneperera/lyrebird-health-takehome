@@ -1,0 +1,11 @@
+// Prisma Schema for Clinic Appointment System
+// This is the initial setup - models will be added in the next commit
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
