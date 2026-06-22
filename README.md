@@ -4,13 +4,12 @@ A RESTful API for managing clinic appointments with overlap detection and concur
 
 ## Features
 
-- ✅ Create and manage clinicians, patients, and appointments
-- ✅ Automatic overlap detection for appointments (touching endpoints allowed)
-- ✅ SERIALIZABLE transaction isolation to prevent race conditions
-- ✅ Role-based access control (patient, clinician, admin)
-- ✅ Comprehensive validation with Zod
-- ✅ OpenAPI/Swagger documentation
-- ✅ Full test coverage (unit + integration tests)
+- Create and manage clinicians, patients, and appointments
+- Automatic overlap detection for appointments (touching endpoints allowed)
+- SERIALIZABLE transaction isolation to prevent race conditions
+- Role-based access control (patient, clinician, admin)
+- Comprehensive validation with Zod
+- Full test coverage (unit + integration tests)
 
 ## Tech Stack
 
@@ -72,6 +71,7 @@ DATABASE_URL="file:./dev.db"
 ```bash
 npx prisma generate
 npx prisma migrate dev --name init
+Alternative: npx prisma db push --accept-data-loss (for faster testing)
 ```
 
 4. **Start the development server:**
