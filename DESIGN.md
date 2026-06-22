@@ -393,53 +393,9 @@ WHERE clinician_id = ?
 
 ### Frequently Asked Questions
 
-#### Q: Why not use optimistic locking instead of SERIALIZABLE transactions?
-
-**A:** Optimistic locking (version numbers) would work but is more complex:
-
-```typescript
-// Optimistic locking approach (NOT using)
-const appointment = await db.appointment.create({
-  data: { ..., version: 1 }
-});
-
-// On update:
-await db.appointment.updateMany({
-  where: { id: appointment.id, version: appointment.version },
-  data: { ..., version: appointment.version + 1 }
-});
-```
-
-**Why we chose SERIALIZABLE:**
-- Simpler code (no version field management)
-- Database handles all concurrency logic
-- Impossible to miss edge cases
-- For this scale (single SQLite file), SERIALIZABLE is sufficient
-
-**When to use optimistic locking:**
-- PostgreSQL in production (better concurrency)
-- High-throughput scenarios (>1000 req/sec)
-- When you need fine-grained conflict detection
-
-#### Q: Why composite index instead of individual indexes?
-
-**A:** Composite index `(clinicianId, startTime, endTime)` is optimal for our query pattern:
-
-```sql
-WHERE clinician_id = ? AND start_time < ? AND end_time > ?
-```
-
-The database can use a single index scan instead of:
-1. Scan `clinicianId` index
-2. Intersect with `startTime` index
-3. Intersect with `endTime` index
-
-**Space cost:** ~50 bytes per appointment (negligible)
-**Query speedup:** ~10x faster than individual indexes
-
 #### Q: How does this handle race conditions?
 
-**Scenario:** Two requests try to book 10:00-11:00 simultaneously.
+**The problem:** Two requests try to book 10:00-11:00 simultaneously.
 
 ```
 Time 0ms:  Request A starts transaction
@@ -448,174 +404,36 @@ Time 5ms:  Request A checks for overlaps → finds NONE
 Time 6ms:  Request B checks for overlaps → BLOCKED (SERIALIZABLE lock)
 Time 10ms: Request A inserts appointment
 Time 11ms: Request A commits
-Time 12ms: Request B unblocks, re-checks for overlaps → finds Request A's appointment
+Time 12ms: Request B unblocks, re-checks → finds Request A's appointment
 Time 13ms: Request B fails with OVERLAP_DETECTED
 Time 14ms: Request B returns 409 Conflict
 ```
 
 **Key:** SERIALIZABLE forces transactions to appear sequential, even if they run concurrently.
 
-#### Q: What happens if the database is locked?
+#### Q: Why not use optimistic locking instead?
 
-**Transaction configuration:**
-```typescript
-await prisma.$transaction(
-  async (tx) => { /* ... */ },
-  {
-    isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-    maxWait: 5000,   // Wait up to 5 seconds for lock
-    timeout: 10000,  // Transaction must complete within 10 seconds
-  }
-);
-```
+**A:** Optimistic locking (version numbers) would work but adds complexity:
+- Must manage version fields manually
+- Application code handles conflicts
+- Easy to miss edge cases
 
-**Behavior:**
-- If locked for >5 seconds: Prisma throws timeout error
-- Service catches error, returns 500 Internal Server Error
-- Client can retry
+**Why SERIALIZABLE is simpler:**
+- Database handles all concurrency logic
+- No version field management
+- Impossible to miss edge cases
+- Sufficient for SQLite scale
 
-**Production improvement:** Use PostgreSQL with row-level locks to reduce contention.
-
-#### Q: Why validate "no past appointments" in the service layer?
-
-**A:** This is a business rule, not a database constraint.
-
-**Service layer owns:**
-- Business logic (what makes sense for the domain)
-- Rules that might change (maybe someday we allow past appointments for backfilling)
-
-**Database layer owns:**
-- Data integrity (foreign keys, unique constraints)
-- Performance (indexes, query optimization)
-
-**Separation of concerns:** If we move to a different database, business rules stay the same.
-
-#### Q: How are timezones handled?
-
-**Short answer:** We don't. All times are in UTC.
-
-**Reasoning:**
-- Simplifies implementation (no timezone conversion bugs)
-- Clients are responsible for displaying in local timezone
-- Database stores consistent UTC times
-
-**Client responsibility:**
-```javascript
-// Client converts local to UTC before sending
-const localTime = new Date('2024-12-25T10:00:00-05:00'); // EST
-const utcTime = localTime.toISOString(); // '2024-12-25T15:00:00Z'
-
-// API receives and stores UTC
-POST /api/appointments { startTime: '2024-12-25T15:00:00Z' }
-```
-
-**Future enhancement:** Add a `timezone` field to clinician profile if needed.
-
-#### Q: What's the expected query performance?
-
-**Benchmarks** (local SQLite, 10,000 appointments):
-
-| Operation | Latency (p50) | Latency (p99) |
-|-----------|---------------|---------------|
-| Create appointment | 8ms | 15ms |
-| List clinician appointments (no filter) | 3ms | 8ms |
-| List clinician appointments (with filter) | 4ms | 10ms |
-| List all appointments (admin) | 12ms | 25ms |
-| Check overlap (in transaction) | 2ms | 5ms |
-
-**Notes:**
-- SQLite on SSD, warmed cache
-- 10k total appointments, ~100 per clinician
-- p99 dominated by database write latency
-
-**Scaling:**
-- SQLite comfortable up to ~100k appointments
-- Beyond that, migrate to PostgreSQL
-
-#### Q: Why Prisma over raw SQL?
-
-**Prisma advantages:**
-- Type-safe queries (compile-time errors)
-- Automatic TypeScript type generation
-- Migration management
-- Built-in connection pooling (in production)
-- Transaction support with isolation levels
-
-**Trade-offs:**
-- ✅ **Pro:** Developer productivity (no manual type definitions)
-- ✅ **Pro:** Fewer bugs (caught at compile time)
-- ✅ **Pro:** Easy to refactor (rename fields, IDE support)
-- ❌ **Con:** Slight performance overhead (~5-10% vs raw SQL)
-- ❌ **Con:** Learning curve for complex queries
-
-**When to use raw SQL:**
-- Very complex queries (window functions, CTEs)
-- Performance-critical hot paths
-- Analytics/reporting queries
-
-**In this project:** Prisma is perfect. Queries are simple, type safety is valuable.
-
-#### Q: How is testing approached?
-
-**Strategy:**
-
-1. **Unit tests** - Business logic in isolation
-   - Overlap detection (6 scenarios)
-   - Date validation
-   - Service-level rules
-
-2. **Integration tests** - Full HTTP cycle
-   - End-to-end request/response
-   - Database interaction
-   - Error handling
-
-**Test database:** In-memory SQLite
-- Fast (no disk I/O)
-- Isolated (each test starts fresh)
-- Identical to production schema
-
-**Coverage target:** 80%+ overall, 100% for critical paths (overlap detection, transactions)
+**When to use optimistic locking:** PostgreSQL in production with high throughput (>1000 req/sec).
 
 #### Q: What would change for production?
 
 **Critical changes:**
 
-1. **Database:** PostgreSQL instead of SQLite
-   ```typescript
-   // Row-level locking instead of SERIALIZABLE
-   await prisma.$executeRaw`
-     SELECT * FROM appointments
-     WHERE clinician_id = ${clinicianId}
-     AND start_time < ${endTime}
-     AND end_time > ${startTime}
-     FOR UPDATE;
-   `;
-   ```
+1. **Database:** PostgreSQL with row-level locks (not global locks)
+2. **Authentication:** JWT tokens instead of X-Role header
+3. **Observability:** Structured logging (Pino), metrics (Prometheus), tracing (OpenTelemetry)
+4. **Scaling:** Connection pooling, Redis caching, read replicas
+5. **Security:** HTTPS/TLS, CORS policies, rate limiting
 
-2. **Authentication:** JWT instead of X-Role header
-   ```typescript
-   // middleware/auth.ts
-   const token = req.headers.authorization?.split(' ')[1];
-   const decoded = jwt.verify(token, SECRET);
-   req.user = { id: decoded.userId, role: decoded.role };
-   ```
-
-3. **Observability:**
-   - Structured logging (Pino)
-   - Metrics (Prometheus)
-   - Distributed tracing (OpenTelemetry)
-   - Error tracking (Sentry)
-
-4. **Scaling:**
-   - Connection pooling
-   - Redis caching for clinician schedules
-   - Read replicas for list queries
-   - API rate limiting
-
-5. **Security:**
-   - HTTPS/TLS
-   - CORS policies
-   - Request validation (size limits)
-   - SQL injection protection (already handled by Prisma)
-
-**Estimated effort:** ~2 weeks to production-ready (including load testing, monitoring setup, security audit)
+**Estimated effort:** ~2 weeks to production-ready.
